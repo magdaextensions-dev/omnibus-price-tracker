@@ -1,0 +1,12 @@
+{
+  "name": "omnibus-price-tracker",
+  "version": "1.0.0",
+  "description": "Codzienny snapshot cen wariantów Shopify do metafieldów, zgodny z dyrektywą Omnibus.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "update": "node scripts/update-price-history.mjs"
+  }
+}

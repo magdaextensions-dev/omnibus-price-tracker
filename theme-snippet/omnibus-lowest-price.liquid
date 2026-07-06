@@ -1,0 +1,40 @@
+{%- comment -%}
+  omnibus-lowest-price.liquid
+  ---------------------------
+  Wyświetla "Najniższą cenę z ostatnich 30 dni" zgodnie z dyrektywą Omnibus,
+  ale TYLKO wtedy, gdy aktualna cena jest realną obniżką względem
+  najniższej ceny z poprzednich dni (bez wliczania dzisiejszej ceny).
+
+  Użycie w product template (np. main-product.liquid), tuż pod blokiem z ceną:
+    {% render 'omnibus-lowest-price', variant: product.selected_or_first_available_variant %}
+
+  Uwaga: przy pierwszym wdrożeniu historia będzie pusta/niepełna, dopóki skrypt
+  nie zbierze danych przez pełne 30 dni. Do tego czasu ten snippet nic nie wyświetli
+  (żeby nie pokazywać błędnej/niepełnej informacji).
+{%- endcomment -%}
+
+{%- assign history_raw = variant.metafields.custom.price_history.value -%}
+{%- assign history_size = history_raw.size | default: 0 -%}
+
+{%- comment -%}
+  Potrzebujemy co najmniej 2 wpisów: dzisiejszego + przynajmniej jednego
+  wcześniejszego, żeby móc porównać aktualną cenę z historią SPRZED dzisiaj.
+{%- endcomment -%}
+{%- if history_size > 1 -%}
+  {%- assign history_size_minus_1 = history_size | minus: 1 -%}
+  {%- assign previous_history = history_raw | slice: 0, history_size_minus_1 -%}
+  {%- assign previous_prices = previous_history | map: "price" | map: "to_f" -%}
+  {%- assign sorted_previous_prices = previous_prices | sort -%}
+  {%- assign lowest_price_before = sorted_previous_prices | first -%}
+  {%- assign current_price = variant.price | divided_by: 100.0 -%}
+
+  {%- comment -%}
+    Pokaż komunikat TYLKO gdy aktualna cena jest niższa niż najniższa cena
+    sprzed dzisiaj — czyli dokładnie wtedy, gdy trwa realna obniżka.
+  {%- endcomment -%}
+  {%- if current_price < lowest_price_before -%}
+    <div class="omnibus-lowest-price">
+      Lowest price in the last 30 days: {{ lowest_price_before | times: 100 | money }}
+    </div>
+  {%- endif -%}
+{%- endif -%}
