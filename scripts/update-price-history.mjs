@@ -2,14 +2,22 @@
  * Omnibus Price History Updater
  * -------------------------------
  * Raz dziennie:
+ *  0. Wymienia Client ID + Client Secret na tymczasowy token dostępu
+ *     (tzw. "client credentials grant" - token ważny 24h, pobierany na nowo
+ *     przy każdym uruchomieniu, więc nigdy nie trzeba go ręcznie odnawiać).
  *  1. Pobiera ceny wszystkich wariantów produktów ze sklepu.
  *  2. Dopisuje dzisiejszy snapshot do metafieldu custom.price_history (na wariancie).
  *  3. Przycina wpisy starsze niż PRICE_HISTORY_DAYS dni.
  *  4. Zapisuje z powrotem przez metafieldsSet (batch po 25 na wywołanie).
  *
  * Wymagane zmienne środowiskowe:
- *  SHOPIFY_STORE_DOMAIN   - np. "twoj-sklep.myshopify.com"
- *  SHOPIFY_ADMIN_TOKEN    - token Admin API custom app (scope: read_products, write_products)
+ *  SHOPIFY_STORE_DOMAIN     - np. "twoj-sklep.myshopify.com"
+ *  SHOPIFY_CLIENT_ID        - "ID klienta" custom apki z Dev Dashboard
+ *  SHOPIFY_CLIENT_SECRET    - "Klucz tajny" custom apki z Dev Dashboard
+ *
+ * Uwaga: apka w Dev Dashboard musi mieć nadane scope'y read_products
+ * i write_products (Wersje -> edytuj wersję -> App scopes -> Release),
+ * oraz być zainstalowana w tym sklepie (Home -> Install app).
  *
  * Opcjonalne:
  *  PRICE_HISTORY_DAYS     - domyślnie 30
@@ -17,23 +25,56 @@
  */
 
 const STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
-const ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
+const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
+const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
 const HISTORY_DAYS = parseInt(process.env.PRICE_HISTORY_DAYS || "30", 10);
 const API_VERSION = process.env.API_VERSION || "2024-10";
 
-if (!STORE_DOMAIN || !ADMIN_TOKEN) {
-  console.error("Brakuje SHOPIFY_STORE_DOMAIN lub SHOPIFY_ADMIN_TOKEN w zmiennych środowiskowych.");
+if (!STORE_DOMAIN || !CLIENT_ID || !CLIENT_SECRET) {
+  console.error(
+    "Brakuje SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID lub SHOPIFY_CLIENT_SECRET w zmiennych środowiskowych."
+  );
   process.exit(1);
 }
 
 const GRAPHQL_URL = `https://${STORE_DOMAIN}/admin/api/${API_VERSION}/graphql.json`;
+const TOKEN_URL = `https://${STORE_DOMAIN}/admin/oauth/access_token`;
 
-async function shopifyGraphQL(query, variables = {}) {
+/**
+ * Wymienia Client ID + Client Secret na tymczasowy token dostępu (ważny 24h).
+ * To tzw. "client credentials grant" - działa tylko gdy apka i sklep należą
+ * do tej samej organizacji w Dev Dashboard (czyli dokładnie nasz przypadek).
+ */
+async function getAccessToken() {
+  const res = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Nie udało się pobrać tokenu dostępu (HTTP ${res.status}): ${text}`);
+  }
+
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error(`Odpowiedź nie zawiera access_token: ${JSON.stringify(data)}`);
+  }
+  console.log(`Pobrano token dostępu (zakresy: ${data.scope}, ważny ${data.expires_in}s).`);
+  return data.access_token;
+}
+
+async function shopifyGraphQL(accessToken, query, variables = {}) {
   const res = await fetch(GRAPHQL_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Shopify-Access-Token": ADMIN_TOKEN,
+      "X-Shopify-Access-Token": accessToken,
     },
     body: JSON.stringify({ query, variables }),
   });
@@ -89,13 +130,13 @@ function trimHistory(history, days) {
   return history.filter((entry) => new Date(entry.date).getTime() >= cutoff);
 }
 
-async function fetchAllVariants() {
+async function fetchAllVariants(accessToken) {
   const variants = [];
   let cursor = null;
   let hasNextPage = true;
 
   while (hasNextPage) {
-    const data = await shopifyGraphQL(PRODUCTS_QUERY, { cursor });
+    const data = await shopifyGraphQL(accessToken, PRODUCTS_QUERY, { cursor });
     for (const productEdge of data.products.edges) {
       const product = productEdge.node;
       for (const variantEdge of product.variants.edges) {
@@ -158,10 +199,10 @@ function buildUpdatedMetafields(variants) {
   return updates;
 }
 
-async function pushUpdatesInBatches(updates, batchSize = 25) {
+async function pushUpdatesInBatches(accessToken, updates, batchSize = 25) {
   for (let i = 0; i < updates.length; i += batchSize) {
     const batch = updates.slice(i, i + batchSize);
-    const data = await shopifyGraphQL(METAFIELDS_SET_MUTATION, { metafields: batch });
+    const data = await shopifyGraphQL(accessToken, METAFIELDS_SET_MUTATION, { metafields: batch });
     if (data.metafieldsSet.userErrors.length > 0) {
       console.error("Błędy przy zapisie batcha:", JSON.stringify(data.metafieldsSet.userErrors));
     } else {
@@ -174,11 +215,14 @@ async function pushUpdatesInBatches(updates, batchSize = 25) {
 
 async function main() {
   console.log(`Start aktualizacji historii cen (${new Date().toISOString()})`);
-  const variants = await fetchAllVariants();
+
+  const accessToken = await getAccessToken();
+
+  const variants = await fetchAllVariants(accessToken);
   console.log(`Pobrano ${variants.length} wariantów.`);
 
   const updates = buildUpdatedMetafields(variants);
-  await pushUpdatesInBatches(updates);
+  await pushUpdatesInBatches(accessToken, updates);
 
   console.log("Gotowe.");
 }
