@@ -1,0 +1,25 @@
+name: Aktualizacja historii cen (Omnibus)
+
+on:
+  schedule:
+    # Codziennie o 02:15 UTC (04:15 czasu polskiego latem, 03:15 zimą)
+    - cron: "15 2 * * *"
+  workflow_dispatch: {} # pozwala odpalić ręcznie z zakładki Actions
+
+jobs:
+  update-price-history:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Uruchom skrypt aktualizujący historię cen
+        env:
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_TOKEN: ${{ secrets.SHOPIFY_ADMIN_TOKEN }}
+        run: node scripts/update-price-history.mjs
