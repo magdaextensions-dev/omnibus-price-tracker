@@ -3,28 +3,34 @@ Automatyzacja kampanii cenowych dla e-hairshop.
 Czyta kampanie z opublikowanego arkusza Google (CSV), rozwiazuje konflikty
 priorytetow, i aktualizuje ceny wariantow w Shopify przez Admin API GraphQL.
 
+Logowanie do Shopify: ten sam mechanizm co w omnibus-price-tracker
+(OAuth client credentials grant) - token jest automatycznie pobierany
+i odnawiany co 24h, nie trzeba go recznie ustawiac.
+
 Wymagane zmienne srodowiskowe (ustawiane jako GitHub Secrets):
-  SHOPIFY_STORE_DOMAIN   -> np. c2cae8-b1.myshopify.com
-  SHOPIFY_ADMIN_TOKEN    -> token prywatnej/wlasnej aplikacji z uprawnieniem write_products
-  SHEET_CSV_URL          -> link "Publikuj w internecie -> CSV" do arkusza kampanii
+  SHOPIFY_STORE_DOMAIN   -> np. c2cae8-b1.myshopify.com (juz istnieje)
+  SHOPIFY_CLIENT_ID      -> juz istnieje (to samo co dla Omnibusa)
+  SHOPIFY_CLIENT_SECRET  -> juz istnieje (to samo co dla Omnibusa)
+  SHEET_CSV_URL          -> nowy sekret, link "Publikuj w internecie -> CSV"
 """
 
 import csv
 import io
 import os
 import sys
-import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import requests
 
 STORE_DOMAIN = os.environ["SHOPIFY_STORE_DOMAIN"]
-ADMIN_TOKEN = os.environ["SHOPIFY_ADMIN_TOKEN"]
+CLIENT_ID = os.environ["SHOPIFY_CLIENT_ID"]
+CLIENT_SECRET = os.environ["SHOPIFY_CLIENT_SECRET"]
 SHEET_CSV_URL = os.environ["SHEET_CSV_URL"]
 API_VERSION = "2025-01"
 
 GRAPHQL_URL = f"https://{STORE_DOMAIN}/admin/api/{API_VERSION}/graphql.json"
+TOKEN_URL = f"https://{STORE_DOMAIN}/admin/oauth/access_token"
 WARSAW = ZoneInfo("Europe/Warsaw")
 
 META_NAMESPACE = "campaigns"
@@ -32,17 +38,67 @@ META_ORIGINAL_PRICE = "original_price"
 META_ORIGINAL_COMPARE = "original_compare_at_price"
 META_ACTIVE_CAMPAIGN = "active_campaign_name"
 
+_access_token = None
+
+
+def get_access_token():
+    """Pobiera nowy token dostepu metoda client_credentials (jak Omnibus).
+    Token jest wazny 24h, ale poniewaz Action uruchamia sie co 5 minut,
+    prosciej i bezpieczniej jest pobierac swiezy token przy kazdym uruchomieniu
+    niz go cache'owac miedzy uruchomieniami."""
+    global _access_token
+    if _access_token:
+        return _access_token
+    resp = requests.post(
+        TOKEN_URL,
+        data={
+            "grant_type": "client_credentials",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+        },
+        timeout=30,
+    )
+    print(f"[DIAG] Token endpoint status: {resp.status_code}")
+    try:
+        body = resp.json()
+    except Exception:
+        body = {}
+    if resp.status_code != 200:
+        print(f"[DIAG] Token endpoint body: {body}")
+    resp.raise_for_status()
+    print(f"[DIAG] Token scope przyznany: {body.get('scope')}, wygasa za (s): {body.get('expires_in')}")
+    _access_token = body["access_token"]
+    print(f"[DIAG] Token (pierwsze 6 znakow): {_access_token[:6]}...")
+    return _access_token
+
 
 def graphql(query, variables=None):
+    token = get_access_token()
     resp = requests.post(
         GRAPHQL_URL,
         json={"query": query, "variables": variables or {}},
         headers={
-            "X-Shopify-Access-Token": ADMIN_TOKEN,
+            "X-Shopify-Access-Token": token,
             "Content-Type": "application/json",
         },
         timeout=30,
     )
+    if resp.status_code != 200:
+        print(f"[DIAG] GraphQL status: {resp.status_code}, body: {resp.text[:500]}")
+    if resp.status_code == 401:
+        # Token mogl wygasnac w trakcie dlugiego przebiegu - odnawiamy raz i probujemy ponownie.
+        global _access_token
+        _access_token = None
+        token = get_access_token()
+        resp = requests.post(
+            GRAPHQL_URL,
+            json={"query": query, "variables": variables or {}},
+            headers={
+                "X-Shopify-Access-Token": token,
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
     resp.raise_for_status()
     data = resp.json()
     if "errors" in data:
