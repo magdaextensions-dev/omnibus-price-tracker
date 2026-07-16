@@ -160,8 +160,22 @@ def fetch_campaigns():
 
 def parse_pl_datetime(text):
     text = text.strip()
-    dt = datetime.strptime(text, "%d.%m.%Y %H:%M")
-    return dt.replace(tzinfo=WARSAW).astimezone(timezone.utc)
+    formats = [
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+    ]
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.replace(tzinfo=WARSAW).astimezone(timezone.utc)
+        except ValueError:
+            continue
+    raise ValueError(f"Nierozpoznany format daty: '{text}'")
 
 
 PRODUCT_QUERY = """
