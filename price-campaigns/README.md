@@ -110,6 +110,22 @@ Jeśli w przyszłości automatyzacja przestanie się uruchamiać co 5 minut —
 najpierw sprawdź, czy token w cron-job.org nie wygasł (patrz punkt 1 powyżej),
 zanim zaczniesz szukać błędu gdzie indziej.
 
+**To samo rozwiązanie zastosowane do Omnibusa (ważne, kontekst prawny):**
+Workflow Omnibusa (plik `.github/workflows/update-price-history.yml`,
+widoczny w Actions jako "Aktualizacja historii cen (Omnibus)") miał ten sam
+problem — wewnętrzny harmonogram GitHub uruchamiał go realnie **raz dziennie**
+zamiast co godzinę/kilka minut. To nie tylko niewygodne, ale **potencjalny
+problem zgodności z dyrektywą Omnibus UE** — im dłuższa luka między obniżką
+ceny a zapisaniem jej w historii, tym dłużej sklep pokazuje obniżoną cenę
+bez wymaganej informacji o najniższej cenie z 30 dni.
+
+Rozwiązanie: w cron-job.org powstało drugie, osobne zadanie —
+**„GitHub Actions - omnibus-price-history trigger"** — wywołujące
+`update-price-history.yml` co 5 minut, tym samym tokenem GitHub
+("Price Campaigns Trigger", uprawnienia obejmują całe repo, więc jeden
+token obsługuje oba workflow). Ten sam token, ta sama zasada wygasania
+za ok. rok — patrz punkt 1 powyżej, dotyczy obu zadań cron jednocześnie.
+
 ## WAŻNA NOTATKA TECHNICZNA (Dev Dashboard vs stary system Shopify)
 
 Aplikacje tworzone w nowym **Dev Dashboard** Shopify (obecny standard) **nie
