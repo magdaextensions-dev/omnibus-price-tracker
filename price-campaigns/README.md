@@ -89,14 +89,13 @@ serwisy tego typu są dokładne, bo to ich jedyne zadanie.
 **Co zostało skonfigurowane:**
 
 1. **Personal Access Token w GitHub** (Settings → Developer settings →
-   Personal access tokens → Fine-grained tokens) — nazwa "Price Campaigns
-   Trigger", dostęp tylko do repo `omnibus-price-tracker`, uprawnienie
-   "Actions: Read and write".
-   **WAŻNE:** ten token, w przeciwieństwie do Client ID/Secret, **wygasa
-   (ustawione na max. dostępny okres, ok. 1 rok)** — trzeba go będzie
-   ręcznie odnowić, wygenerować nowy w tym samym miejscu, i podmienić
-   w konfiguracji cron-job.org. Warto ustawić sobie przypomnienie w
-   kalendarzu na ok. rok od dzisiejszej daty.
+   Personal access tokens → **Tokens (classic)**) — nazwa
+   "cron-job.org - price-campaigns trigger", scope: `repo`.
+   **Potwierdzone w panelu GitHub (16.07.2026): "This token has no
+   expiration date."** — to token typu classic, nie fine-grained, więc
+   w przeciwieństwie do wcześniejszych obaw w tym README, **nie wygasa
+   i nie trzeba go nigdy odnawiać**, dokładnie tak jak Client ID/Secret
+   Shopify.
 
 2. **Konto na cron-job.org**, z jednym cronjobem:
    - URL: `https://api.github.com/repos/magdaextensions-dev/omnibus-price-tracker/actions/workflows/price-campaigns.yml/dispatches`
@@ -107,8 +106,9 @@ serwisy tego typu są dokładne, bo to ich jedyne zadanie.
    - Treść żądania: `{"ref":"main"}`
 
 Jeśli w przyszłości automatyzacja przestanie się uruchamiać co 5 minut —
-najpierw sprawdź, czy token w cron-job.org nie wygasł (patrz punkt 1 powyżej),
-zanim zaczniesz szukać błędu gdzie indziej.
+token GitHub to nie jest już podejrzany (nie wygasa), więc sprawdź najpierw
+cron-job.org (czy konto/zadanie jest nadal aktywne) i GitHub Actions (czy
+workflow nie został ręcznie wyłączony).
 
 **To samo rozwiązanie zastosowane do Omnibusa (ważne, kontekst prawny):**
 Workflow Omnibusa (plik `.github/workflows/update-price-history.yml`,
@@ -122,9 +122,8 @@ bez wymaganej informacji o najniższej cenie z 30 dni.
 Rozwiązanie: w cron-job.org powstało drugie, osobne zadanie —
 **„GitHub Actions - omnibus-price-history trigger"** — wywołujące
 `update-price-history.yml` co 5 minut, tym samym tokenem GitHub
-("Price Campaigns Trigger", uprawnienia obejmują całe repo, więc jeden
-token obsługuje oba workflow). Ten sam token, ta sama zasada wygasania
-za ok. rok — patrz punkt 1 powyżej, dotyczy obu zadań cron jednocześnie.
+(classic PAT "cron-job.org - price-campaigns trigger", bez wygaśnięcia,
+uprawnienia obejmują całe repo, więc jeden token obsługuje oba workflow).
 
 ## WAŻNA NOTATKA TECHNICZNA (Dev Dashboard vs stary system Shopify)
 
@@ -148,6 +147,27 @@ Jak sprawdzić aktualne uprawnienia (scopes) aplikacji w Dev Dashboard:
 3. Zakładka **„Apps"** → kliknij na aplikację.
 4. Zakładka **„Configuration"** (albo „API access") — tam widać listę
    zaznaczonych zakresów dostępu (scopes), np. `read_products`, `write_products`.
+
+## Kolumna "Status" w arkuszu — WAŻNE SPROSTOWANIE
+
+Wcześniej (w rozmowie, nie w tym pliku) padło błędne stwierdzenie, że
+kolumna "Status" w arkuszu wypełnia się automatycznie (Planowana/Aktywna/
+Zakończona). **To nieprawda i nigdy nie było zaimplementowane.** Skrypt
+czyta arkusz wyłącznie przez publiczny link CSV (tryb tylko do odczytu) —
+nie ma technicznej możliwości zapisania czegokolwiek z powrotem do Google
+Sheets. Kolumna "Status" to czyste pole na Twoje własne notatki, nic
+więcej.
+
+**Jak naprawdę sprawdzić, czy kampania zadziałała:**
+- GitHub → zakładka **Actions** → workflow "Price Campaigns" → najnowsze
+  uruchomienie → rozwiń krok "Run campaign sync" → w logach szukaj
+  "START/UPDATE" (start kampanii) albo "KONIEC KAMPANII" (zakończenie).
+- Albo po prostu sprawdź aktualną cenę produktu bezpośrednio w Shopify.
+
+Jeśli w przyszłości zechcesz, żeby Status faktycznie się aktualizował,
+to wymaga dodatkowej pracy: podłączenia Google Sheets API z uprawnieniem
+zapisu (nie tylko odczytu przez publiczny CSV) — to osobne zadanie,
+nie zrobione w obecnej wersji.
 
 ## Jak to działa (skrócony opis techniczny)
 
