@@ -18,6 +18,7 @@ import csv
 import io
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -73,38 +74,62 @@ def get_access_token():
 
 
 def graphql(query, variables=None):
-    token = get_access_token()
-    resp = requests.post(
-        GRAPHQL_URL,
-        json={"query": query, "variables": variables or {}},
-        headers={
-            "X-Shopify-Access-Token": token,
-            "Content-Type": "application/json",
-        },
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        print(f"[DIAG] GraphQL status: {resp.status_code}, body: {resp.text[:500]}")
-    if resp.status_code == 401:
-        # Token mogl wygasnac w trakcie dlugiego przebiegu - odnawiamy raz i probujemy ponownie.
-        global _access_token
-        _access_token = None
+    """Wysyla zapytanie do Shopify. Przy chwilowych bledach (503, 502, 504, 500,
+    429, utrata polaczenia, throttling) ponawia probe kilka razy z rosnaca przerwa,
+    zeby jednorazowa awaria po stronie Shopify nie przewracala calego uruchomienia."""
+    global _access_token
+    max_attempts = 5
+    token_refreshed = False
+    for attempt in range(1, max_attempts + 1):
         token = get_access_token()
-        resp = requests.post(
-            GRAPHQL_URL,
-            json={"query": query, "variables": variables or {}},
-            headers={
-                "X-Shopify-Access-Token": token,
-                "Content-Type": "application/json",
-            },
-            timeout=30,
-        )
-    resp.raise_for_status()
-    data = resp.json()
-    if "errors" in data:
-        raise RuntimeError(f"GraphQL error: {data['errors']}")
-    return data["data"]
-
+        try:
+            resp = requests.post(
+                GRAPHQL_URL,
+                json={"query": query, "variables": variables or {}},
+                headers={
+                    "X-Shopify-Access-Token": token,
+                    "Content-Type": "application/json",
+                },
+                timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            if attempt == max_attempts:
+                raise
+            wait = 2 ** attempt
+            print(f"[RETRY] Blad polaczenia ({e}), proba {attempt}/{max_attempts}, czekam {wait}s")
+            time.sleep(wait)
+            continue
+        if resp.status_code == 401 and not token_refreshed:
+            # Token mogl wygasnac w trakcie dlugiego przebiegu - odnawiamy raz i probujemy ponownie.
+            print("[DIAG] GraphQL status: 401 - odnawiam token")
+            _access_token = None
+            token_refreshed = True
+            continue
+        if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_attempts:
+            wait = 2 ** attempt
+            try:
+                wait = max(wait, int(float(resp.headers.get("Retry-After", 0))))
+            except ValueError:
+                pass
+            print(f"[RETRY] GraphQL status {resp.status_code}, proba {attempt}/{max_attempts}, czekam {wait}s")
+            time.sleep(wait)
+            continue
+        if resp.status_code != 200:
+            print(f"[DIAG] GraphQL status: {resp.status_code}, body: {resp.text[:500]}")
+        resp.raise_for_status()
+        data = resp.json()
+        if "errors" in data:
+            throttled = any(
+                (err.get("extensions") or {}).get("code") == "THROTTLED"
+                for err in data["errors"] if isinstance(err, dict)
+            )
+            if throttled and attempt < max_attempts:
+                wait = 2 ** attempt
+                print(f"[RETRY] Shopify THROTTLED, proba {attempt}/{max_attempts}, czekam {wait}s")
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"GraphQL error: {data['errors']}")
+        return data["data"]
 
 def fetch_campaigns():
     resp = requests.get(SHEET_CSV_URL, timeout=30)
