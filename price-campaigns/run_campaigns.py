@@ -119,13 +119,14 @@ def graphql(query, variables=None):
         resp.raise_for_status()
         data = resp.json()
         if "errors" in data:
-            throttled = any(
-                (err.get("extensions") or {}).get("code") == "THROTTLED"
+            retryable_codes = ("THROTTLED", "INTERNAL_SERVER_ERROR", "SERVICE_UNAVAILABLE", "TIMEOUT")
+            transient = any(
+                (err.get("extensions") or {}).get("code") in retryable_codes
                 for err in data["errors"] if isinstance(err, dict)
             )
-            if throttled and attempt < max_attempts:
+            if transient and attempt < max_attempts:
                 wait = 2 ** attempt
-                print(f"[RETRY] Shopify THROTTLED, proba {attempt}/{max_attempts}, czekam {wait}s")
+                print(f"[RETRY] Shopify chwilowy blad GraphQL, proba {attempt}/{max_attempts}, czekam {wait}s")
                 time.sleep(wait)
                 continue
             raise RuntimeError(f"GraphQL error: {data['errors']}")
