@@ -38,6 +38,7 @@ META_NAMESPACE = "campaigns"
 META_ORIGINAL_PRICE = "original_price"
 META_ORIGINAL_COMPARE = "original_compare_at_price"
 META_ACTIVE_CAMPAIGN = "active_campaign_name"
+META_CAMPAIGN_PRICE = "campaign_price"  # cena ustawiona przez skrypt - pozwala wykryc reczna zmiane ceny
 
 _access_token = None
 
@@ -359,6 +360,41 @@ def apply_update(product_id, variant_id, price, compare_at_price, metafields_inp
     errors = result["productVariantsBulkUpdate"]["userErrors"]
     if errors:
         print(f"[BLAD] Wariant {variant_id}: {errors}")
+        return False
+    return True
+
+
+METAFIELDS_DELETE_MUTATION = """
+mutation deleteMetafields($metafields: [MetafieldIdentifierInput!]!) {
+  metafieldsDelete(metafields: $metafields) {
+    userErrors { field message }
+  }
+}
+"""
+
+
+def delete_campaign_metafields(variant_ids):
+    """Usuwa znaczniki kampanii (nazwe kampanii i cene kampanijna) z wariantow.
+    Wpisanie pustego tekstu NIE kasuje metafielda w Shopify - trzeba go usunac.
+    Dzieki temu zakonczona kampania nie jest 'konczona' od nowa co 5 minut."""
+    failed = 0
+    ids = list(variant_ids)
+    for i in range(0, len(ids), 25):
+        chunk = ids[i:i + 25]
+        identifiers = []
+        for vid in chunk:
+            for key in (META_ACTIVE_CAMPAIGN, META_CAMPAIGN_PRICE):
+                identifiers.append({"ownerId": vid, "namespace": META_NAMESPACE, "key": key})
+        try:
+            result = graphql(METAFIELDS_DELETE_MUTATION, {"metafields": identifiers})
+            errors = result["metafieldsDelete"]["userErrors"]
+            if errors:
+                failed += len(chunk)
+                print(f"[BLAD] Usuwanie znacznikow kampanii: {errors}")
+        except Exception as e:
+            failed += len(chunk)
+            print(f"[BLAD] Usuwanie znacznikow kampanii nie powiodlo sie: {e}")
+    return failed
 
 
 def main():
@@ -381,11 +417,16 @@ def main():
                 variant_active_campaigns.setdefault(vid, []).append(c)
 
     touched = 0
+    to_clear = []  # warianty, ktorym po zakonczeniu kampanii trzeba skasowac znaczniki
     for vid, vdata in variant_data_cache.items():
         active_list = variant_active_campaigns.get(vid, [])
         meta = vdata["metafields"]
         stored_original_price = meta.get(META_ORIGINAL_PRICE)
         stored_original_compare = meta.get(META_ORIGINAL_COMPARE)
+
+        active_flag = meta.get(META_ACTIVE_CAMPAIGN)
+        stored_campaign_price = meta.get(META_CAMPAIGN_PRICE)
+        current_price = vdata["price"]
 
         if active_list:
             def sort_key(camp):
@@ -393,17 +434,30 @@ def main():
                 return (prio, -camp["value"])
             winner = sorted(active_list, key=sort_key)[0]
 
-            base_price = float(stored_original_price) if stored_original_price else vdata["price"]
-            base_compare = (
-                float(stored_original_compare) if stored_original_compare
-                else vdata["compare_at_price"]
-            )
+            # Zapisana cena pierwotna jest wazna TYLKO gdy kampania faktycznie trwa
+            # (jest znacznik). Pozostalosc po starej kampanii nie moze byc podstawa
+            # nowej obnizki - wtedy liczymy od aktualnej ceny regularnej ze sklepu.
+            campaign_running = bool(active_flag) and stored_original_price is not None
+            manual_change = False
+            if campaign_running:
+                base_price = float(stored_original_price)
+                base_compare = float(stored_original_compare) if stored_original_compare else None
+                if stored_campaign_price is not None and abs(current_price - float(stored_campaign_price)) >= 0.005:
+                    # Cena zostala zmieniona recznie w trakcie kampanii (np. nowa cena
+                    # od producenta) - to jest nowa cena regularna, nie nadpisujemy jej.
+                    manual_change = True
+                    base_price = current_price
+                    print(f"RECZNA ZMIANA CENY w trakcie kampanii: wariant {vid}: {stored_campaign_price} -> {current_price}, przyjmuje {current_price} jako nowa cene regularna")
+            else:
+                base_price = current_price
+                base_compare = vdata["compare_at_price"]
 
             new_price = compute_discounted_price(base_price, winner["discount_type"], winner["value"])
 
-            if stored_original_price and float(stored_original_price) == base_price and \
-               abs(vdata["price"] - new_price) < 0.005 and \
-               meta.get(META_ACTIVE_CAMPAIGN) == winner["name"]:
+            if campaign_running and not manual_change and \
+               abs(float(stored_original_price) - base_price) < 0.005 and \
+               abs(current_price - new_price) < 0.005 and \
+               active_flag == winner["name"]:
                 continue  # juz ustawione poprawnie, nic do zrobienia
 
             metafields_input = [
@@ -411,6 +465,8 @@ def main():
                  "type": "number_decimal", "value": f"{base_price:.2f}"},
                 {"namespace": META_NAMESPACE, "key": META_ACTIVE_CAMPAIGN,
                  "type": "single_line_text_field", "value": winner["name"]},
+                {"namespace": META_NAMESPACE, "key": META_CAMPAIGN_PRICE,
+                 "type": "number_decimal", "value": f"{new_price:.2f}"},
             ]
             if base_compare is not None:
                 metafields_input.append({
@@ -423,21 +479,32 @@ def main():
             touched += 1
 
         else:
-            active_flag = meta.get(META_ACTIVE_CAMPAIGN)
             if active_flag:
                 # Byla aktywna kampania, teraz sie skonczyla -> przywracamy cene.
-                restore_price = float(stored_original_price) if stored_original_price else vdata["price"]
+                restore_price = float(stored_original_price) if stored_original_price else current_price
                 restore_compare = float(stored_original_compare) if stored_original_compare else None
-                print(f"KONIEC KAMPANII: wariant {vid} -> przywracam {restore_price}")
-                # Metafield tekstowy mozna wyczyscic pustym stringiem.
-                # Metafieldy liczbowe (original_price/compare) zostawiamy jako historyczny
-                # zapis - nie sa odczytywane, gdy active_campaign_name jest puste.
-                metafields_input = [
-                    {"namespace": META_NAMESPACE, "key": META_ACTIVE_CAMPAIGN,
-                     "type": "single_line_text_field", "value": ""},
-                ]
-                apply_update(vdata["product_id"], vid, restore_price, restore_compare, metafields_input)
-                touched += 1
+                if stored_campaign_price is not None and abs(current_price - float(stored_campaign_price)) >= 0.005:
+                    # Cena zmieniona recznie w trakcie kampanii - zostawiamy ja.
+                    restore_price = current_price
+                    print(f"KONIEC KAMPANII: wariant {vid}: cena zmieniona recznie ({current_price}), nie nadpisuje")
+                current_compare = vdata["compare_at_price"]
+                price_same = abs(current_price - restore_price) < 0.005
+                compare_same = (current_compare is None and restore_compare is None) or \
+                    (current_compare is not None and restore_compare is not None
+                     and abs(current_compare - restore_compare) < 0.005)
+                ok = True
+                if price_same and compare_same:
+                    print(f"KONIEC KAMPANII: wariant {vid} -> cena {restore_price} juz poprawna, czyszcze tylko znacznik")
+                else:
+                    print(f"KONIEC KAMPANII: wariant {vid} -> przywracam {restore_price}")
+                    ok = apply_update(vdata["product_id"], vid, restore_price, restore_compare, None)
+                    touched += 1
+                if ok:
+                    to_clear.append(vid)
+
+    if to_clear:
+        failed = delete_campaign_metafields(to_clear)
+        print(f"Wyczyszczono znaczniki kampanii: {len(to_clear) - failed} wariantow.")
 
     print(f"Zakonczono. Zmodyfikowano {touched} wariantow.")
 
